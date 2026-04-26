@@ -1,0 +1,87 @@
+name: Bootstrap multi-env TF state SA and RG
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: 'Azure Region'
+        required: true
+        default: 'westeurope'
+
+permissions:
+  id-token: write
+  contents: read
+  
+jobs:
+  provision-state:
+    name: Provision ${{ matrix.env }} Storage
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [test, stage, prod]
+        basename: ["dotnet"] ## NAME_OF_THE APP/PROJECT --- IGNORE ---
+        include:
+          - env: test
+            tenant_id: '72f988bf-86f1-4111-9d98-000000000000'
+            subscription_id: '00000000-0000-0000-0000-000000000000'
+            client_id: '00000000-0000-0000-0000-000000000000'
+          - env: stage
+            tenant_id: '72f988bf-86f1-4111-9d98-000000000000'
+            subscription_id: '00000000-0000-0000-0000-000000000000'
+            client_id: '00000000-0000-0000-0000-000000000000'
+          - env: prod
+            tenant_id: '72f988bf-86f1-4111-9d98-000000000000'
+            subscription_id: '00000000-0000-0000-0000-000000000000'
+            client_id: '00000000-0000-0000-0000-000000000000'
+
+    env:
+      resource_group_name: "${{ matrix.env }}-${{ matrix.basename }}-tfstate-rg"
+      storage_account_name: "${{ matrix.env }}${{ matrix.basename }}tfstatesa"
+      container_name: "tfstate"
+    
+    steps:
+      - name: AZ login
+        uses: azure/login@v2
+        with:
+          tenant-id: ${{ matrix.tenant_id }}
+          subscription-id: ${{ matrix.subscription_id }}
+          client-id: ${{ matrix.client_id }}
+          allow-no-subscriptions: true
+
+
+      - name: Create Resource Group
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az group create --name ${{ env.resource_group_name }} --location ${{ inputs.region }}
+
+      - name: Create Storage Account
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az storage account create \
+            --name ${{ env.storage_account_name }} \
+            --resource-group ${{ env.resource_group_name }} \
+            --location ${{ inputs.region }} \
+            --sku Standard_LRS
+
+
+      - name: Create Storage Container
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az storage container create \
+            --name ${{ env.container_name }} \
+            --account-name ${{ env.storage_account_name }} \
+      
+
+      - name: Create placeholder for tfstate file
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az storage blob upload \
+            --account-name ${{ env.storage_account_name }} \
+            --container-name ${{ env.container_name }} \
+            --name terraform.tfstate \
+            --file /dev/null \
+            --auth-mode login

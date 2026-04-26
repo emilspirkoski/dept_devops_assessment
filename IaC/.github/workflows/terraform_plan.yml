@@ -1,0 +1,103 @@
+name: Terraform Plan 
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  id-token: write 
+
+concurrency:
+  group: terraform-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tf_plan_test:
+    name: Terraform Plan - Test
+    environment: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.9
+      - name: Terraform Plan
+        env:
+          ARM_CLIENT_ID: ${{ secrets.TEST_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.TEST_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.TEST_TENANT_ID }}
+          ARM_USE_OIDC: true
+        run: |
+          terraform init \
+          -backend-config="resource_group_name=test-dotnet-tfstate-rg" \
+          -backend-config="storage_account_name=testdotnettfstatesa" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=terraform.tfstate"
+
+          terraform fmt -recursive -check
+
+          terraform validate
+
+          terraform plan \
+          -var-file="test.tfvars"
+
+  tf_plan_stage:
+    name: Terraform Plan - Stage
+    environment: stage
+    runs-on: ubuntu-latest
+    needs: tf_plan_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.9
+      - name: Terraform Plan
+        env:
+          ARM_CLIENT_ID: ${{ secrets.STAGE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.STAGE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.STAGE_TENANT_ID }}
+          ARM_USE_OIDC: true
+        run: |
+          terraform init \
+          -backend-config="resource_group_name=stage-dotnet-tfstate-rg" \
+          -backend-config="storage_account_name=stagedotnettfstatesa" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=terraform.tfstate"
+
+          terraform fmt -recursive -check
+
+          terraform validate
+
+          terraform plan \
+          -var-file="stage.tfvars"
+
+  tf_plan_prod:
+    name: Terraform Plan - Prod
+    environment: prod
+    runs-on: ubuntu-latest
+    needs: tf_plan_stage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.9
+      - name: Terraform Plan
+        env:
+          ARM_CLIENT_ID: ${{ secrets.PROD_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.PROD_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.PROD_TENANT_ID }}
+          ARM_USE_OIDC: true
+        run: |
+          terraform init \
+          -backend-config="resource_group_name=prod-dotnet-tfstate-rg" \
+          -backend-config="storage_account_name=prodotnettfstatesa" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=terraform.tfstate"
+
+          terraform fmt -recursive -check
+
+          terraform validate
+
+          terraform plan \
+          -var-file="prod.tfvars"

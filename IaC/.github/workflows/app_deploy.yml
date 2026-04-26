@@ -1,0 +1,252 @@
+name: App Deploy
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# Queue deployments on the same branch rather than cancelling in-progress runs.
+concurrency:
+  group: app-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore src/DotnetApp/DotnetApp.csproj
+
+      - name: Build
+        run: dotnet build src/DotnetApp/DotnetApp.csproj --configuration Release --no-restore
+
+      - name: Publish
+        run: dotnet publish src/DotnetApp/DotnetApp.csproj --configuration Release --no-build --output ./publish
+
+      - name: ZIP artifact
+        run: |
+          cd publish
+          zip -r ../app.zip .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: app.zip
+          retention-days: 1
+
+  deploy_test:
+    name: Deploy - Test
+    needs: build
+    # Uses the test-deploy federated credential created by the github_oidc module.
+    environment: test-deploy
+    runs-on: ubuntu-latest
+    env:
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      APP_NAME: ${{ vars.APP_NAME }}
+      SLOT_NAME: ${{ vars.SLOT_NAME }}
+      KV_NAME: ${{ vars.KV_NAME }}
+      APPSETTINGS_FILE: ${{ vars.APPSETTINGS_FILE }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: app
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          subscription-id: ${{ secrets.SUBSCRIPTION_ID }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+
+      - name: Inject secrets into appsettings
+        run: |
+          mkdir app_extracted
+          cd app_extracted && unzip ../app.zip
+
+          DB_CONN=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "db-connection-string" \
+            --query value -o tsv)
+
+          APPINSIGHTS_CONN=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "app-insights-connection-string" \
+            --query value -o tsv)
+
+          APPINSIGHTS_KEY=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "app-insights-instrumentation-key" \
+            --query value -o tsv)
+
+          sed -i \
+            -e "s|#{DB_CONNECTION_STRING}#|${DB_CONN}|g" \
+            -e "s|#{APPINSIGHTS_CONNECTION_STRING}#|${APPINSIGHTS_CONN}|g" \
+            -e "s|#{APPINSIGHTS_INSTRUMENTATION_KEY}#|${APPINSIGHTS_KEY}|g" \
+            "${{ env.APPSETTINGS_FILE }}"
+
+          cd .. && zip -r app_new.zip app_extracted && mv app_new.zip app.zip
+
+      - name: Deploy to Staging Slot
+        run: |
+          az webapp deploy \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "${{ env.APP_NAME }}" \
+            --slot "${{ env.SLOT_NAME }}" \
+            --src-path app.zip \
+            --type zip
+
+      - name: Swap Slot to Production
+        run: |
+          az webapp deployment slot swap \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "${{ env.APP_NAME }}" \
+            --slot "${{ env.SLOT_NAME }}" \
+            --target-slot production
+
+  deploy_stage:
+    name: Deploy - Stage
+    needs: deploy_test
+    # Requires approval gate configured on the stage-deploy GitHub environment.
+    environment: stage-deploy
+    runs-on: ubuntu-latest
+    env:
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      APP_NAME: ${{ vars.APP_NAME }}
+      SLOT_NAME: ${{ vars.SLOT_NAME }}
+      KV_NAME: ${{ vars.KV_NAME }}
+      APPSETTINGS_FILE: ${{ vars.APPSETTINGS_FILE }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: app
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          subscription-id: ${{ secrets.SUBSCRIPTION_ID }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+
+      - name: Inject secrets into appsettings
+        run: |
+          mkdir app_extracted
+          cd app_extracted && unzip ../app.zip
+
+          DB_CONN=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "db-connection-string" \
+            --query value -o tsv)
+
+          APPINSIGHTS_CONN=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "app-insights-connection-string" \
+            --query value -o tsv)
+
+          APPINSIGHTS_KEY=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "app-insights-instrumentation-key" \
+            --query value -o tsv)
+
+          sed -i \
+            -e "s|#{DB_CONNECTION_STRING}#|${DB_CONN}|g" \
+            -e "s|#{APPINSIGHTS_CONNECTION_STRING}#|${APPINSIGHTS_CONN}|g" \
+            -e "s|#{APPINSIGHTS_INSTRUMENTATION_KEY}#|${APPINSIGHTS_KEY}|g" \
+            "${{ env.APPSETTINGS_FILE }}"
+
+          cd .. && zip -r app_new.zip app_extracted && mv app_new.zip app.zip
+
+      - name: Deploy to Staging Slot
+        run: |
+          az webapp deploy \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "${{ env.APP_NAME }}" \
+            --slot "${{ env.SLOT_NAME }}" \
+            --src-path app.zip \
+            --type zip
+
+      - name: Swap Slot to Production
+        run: |
+          az webapp deployment slot swap \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "${{ env.APP_NAME }}" \
+            --slot "${{ env.SLOT_NAME }}" \
+            --target-slot production
+
+  deploy_prod:
+    name: Deploy - Prod
+    needs: deploy_stage
+    # Requires approval gate configured on the prod-deploy GitHub environment.
+    environment: prod-deploy
+    runs-on: ubuntu-latest
+    env:
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+      APP_NAME: ${{ vars.APP_NAME }}
+      SLOT_NAME: ${{ vars.SLOT_NAME }}
+      KV_NAME: ${{ vars.KV_NAME }}
+      APPSETTINGS_FILE: ${{ vars.APPSETTINGS_FILE }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: app
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          subscription-id: ${{ secrets.SUBSCRIPTION_ID }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+
+      - name: Inject secrets into appsettings
+        run: |
+          mkdir app_extracted
+          cd app_extracted && unzip ../app.zip
+
+          DB_CONN=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "db-connection-string" \
+            --query value -o tsv)
+
+          APPINSIGHTS_CONN=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "app-insights-connection-string" \
+            --query value -o tsv)
+
+          APPINSIGHTS_KEY=$(az keyvault secret show \
+            --vault-name "${{ env.KV_NAME }}" \
+            --name "app-insights-instrumentation-key" \
+            --query value -o tsv)
+
+          sed -i \
+            -e "s|#{DB_CONNECTION_STRING}#|${DB_CONN}|g" \
+            -e "s|#{APPINSIGHTS_CONNECTION_STRING}#|${APPINSIGHTS_CONN}|g" \
+            -e "s|#{APPINSIGHTS_INSTRUMENTATION_KEY}#|${APPINSIGHTS_KEY}|g" \
+            "${{ env.APPSETTINGS_FILE }}"
+
+          cd .. && zip -r app_new.zip app_extracted && mv app_new.zip app.zip
+
+      - name: Deploy to Staging Slot
+        run: |
+          az webapp deploy \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "${{ env.APP_NAME }}" \
+            --slot "${{ env.SLOT_NAME }}" \
+            --src-path app.zip \
+            --type zip
+
+      - name: Swap Slot to Production
+        run: |
+          az webapp deployment slot swap \
+            --resource-group "${{ env.RESOURCE_GROUP }}" \
+            --name "${{ env.APP_NAME }}" \
+            --slot "${{ env.SLOT_NAME }}" \
+            --target-slot production
